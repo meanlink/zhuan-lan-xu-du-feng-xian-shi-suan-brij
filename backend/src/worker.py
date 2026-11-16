@@ -16,14 +16,17 @@ def execute(job_id):
         j.status='running'; db.commit()
         try:
             d=db.get(Dataset,j.dataset_id)
-            result=analyze(d.records,j.params)
+            # The job's own frozen snapshot is the only identity source here.
+            # A merge or split that lands after the experiment was created must
+            # not change a queued job or a recovered job.
+            result=analyze(d.records,j.params,j.identity_snapshot)
             json.dumps(result,allow_nan=False)
             j.result=result;j.status='completed';j.finished_at=time.time()
-            record(db,'worker','job.completed',{'id':j.id})
+            record(db,'worker','job.completed',{'id':j.id,'identity_version':j.identity_version})
         except Exception as e:
             logging.exception('Analysis failed')
             j.status='failed';j.error=str(e)[:990];j.finished_at=time.time()
-            record(db,'worker','job.failed',{'id':j.id,'error':j.error})
+            record(db,'worker','job.failed',{'id':j.id,'error':j.error,'identity_version':j.identity_version})
         db.commit()
 def tick():
     with Session() as db:
@@ -37,9 +40,10 @@ def tick():
 def main():
     r=Redis.from_url(REDIS_URL,socket_timeout=3)
     # This Compose stack has a single worker. A crash must not strand its jobs.
+    # Recovery only touches status; the frozen identity snapshot survives.
     with Session() as db:
         for j in db.scalars(select(Job).where(Job.status=='running')):
-            j.status='queued';record(db,'worker','job.recovered',{'id':j.id})
+            j.status='queued';record(db,'worker','job.recovered',{'id':j.id,'identity_version':j.identity_version})
         db.commit()
     while True:
         Path('/tmp/heartbeat').touch()

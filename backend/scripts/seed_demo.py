@@ -3,6 +3,7 @@ from sqlalchemy import select, func
 from src.config.database import Session
 from migrations.initial import migrate
 from src.models import User, Dataset, Job, Report, Delivery, Audit
+from src.services import identity
 from src.services.business import metadata, seed_records, analyze
 from src.services.reports import deliver
 from src.utils.security import hash_password
@@ -21,18 +22,32 @@ def seed():
             rows=seed_records()
             d=Dataset(name=m['dataset_name'],source=m['short']+'-202611.csv',records=rows,checksum=checksum(rows),created_at=time.time())
             db.add(d); db.flush()
+            identity.ensure_numbers(db,[r['reader_id'] for r in rows],'seed','演示批次接入')
+            # One reader changed their login number: the two numbers are the
+            # same person, so merge them before the baseline is frozen.
+            identity.merge(db,'seed',['RD-0007','RD-0102'],
+                           identity.current_version(db),
+                           reason='演示：同一位读者换号，前台曾显示为两人',
+                           operation_key='seed-demo-merge')
+            db.commit()
+        identity.ensure_numbers(db,[r['reader_id'] for r in d.records],'seed','演示批次接入')
         if not db.scalar(select(Job).where(Job.name=='基线复核 · '+m['name'])):
-            params={p['key']:p['default'] for p in m.get('parameters',[])}
-            result=analyze(d.records,params)
-            json.dumps(result,ensure_ascii=False,allow_nan=False)
             admin=db.scalar(select(User).where(User.role=='admin'))
-            j=Job(name='基线复核 · '+m['name'],dataset_id=d.id,params=params,status='completed',result=result,created_by=admin.id,created_at=time.time()-3600,finished_at=time.time()-3595,approved=True)
+            snapshot=identity.snapshot_for_records(db,d.records,'seed',reason='演示基线试验')
+            params={p['key']:p['default'] for p in m.get('parameters',[])}
+            result=analyze(d.records,params,snapshot)
+            json.dumps(result,ensure_ascii=False,allow_nan=False)
+            j=Job(name='基线复核 · '+m['name'],dataset_id=d.id,params=params,status='completed',result=result,
+                  created_by=admin.id,created_at=time.time()-3600,finished_at=time.time()-3595,approved=True,
+                  identity_version=snapshot['version'],identity_fingerprint=snapshot['fingerprint'],
+                  identity_snapshot=snapshot)
             db.add(j);db.flush()
             r=Report(name='每日业务复核简报',job_id=j.id,destination='业务复核组 · 本地收件箱',interval_seconds=86400,next_run=time.time()+86400,enabled=True)
             db.add(r);db.flush();deliver(db,r)
-            db.add(Audit(actor='seed',action='demo.baseline',detail={'dataset':d.id},at=time.time()))
+            db.add(Audit(actor='seed',action='demo.baseline',detail={'dataset':d.id,'identity_version':snapshot['version']},at=time.time()))
         db.commit()
         counts={model.__tablename__:db.scalar(select(func.count()).select_from(model)) for model in [User,Dataset,Job,Report,Delivery,Audit]}
+        counts['identity_version']=identity.current_version(db)
         print(json.dumps(counts,ensure_ascii=False))
         return counts
 if __name__=='__main__':seed()

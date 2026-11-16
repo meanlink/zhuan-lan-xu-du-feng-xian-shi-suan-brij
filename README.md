@@ -3,8 +3,8 @@
 分类与阈值选择的真实业务分析小型项目。完整模拟客户、痛点、上下游、算法公式与一天工作剧本见 [BUSINESS.md](BUSINESS.md)。
 
 ## 模块与业务流程
-数据接入（JSON/CSV、字段验证、批次指纹）→ 参数化分析（异步 Python worker）→ 结果复核（指标、图形、明细、解释、批准）→ 定时分发（本地收件箱、CSV/JSON、SHA256）；另有业务总览和审计轨迹。
-三个贯穿全栈的实体：Dataset 数据批次、Job 分析任务、Report 分发计划；辅助 User、Audit、Delivery。
+数据接入（JSON/CSV、字段验证、批次指纹）→ 身份归并台账（多号码合为一人、按号码拆回、版本化历史）→ 参数化分析（异步 Python worker，冻结身份快照）→ 结果复核（指标、图形、明细、解释、身份依据、批准）→ 定时分发（本地收件箱、CSV/JSON、SHA256）；另有业务总览和审计轨迹。
+三个贯穿全栈的实体：Dataset 数据批次、Job 分析任务、Report 分发计划；身份台账（IdentityGroup / IdentityNumber / IdentityMembership / IdentityOperation）把多个 reader_id 归到一个真实读者；辅助 User、Audit、Delivery。
 
 ## 快速启动
 ```bash
@@ -18,9 +18,16 @@ docker compose exec -T backend python -m scripts.seed_demo
 ## 演示账号与权限
 |账号|密码|真实权限|
 |---|---|---|
-|admin@demo.local|Demo123!|接入、执行、批准、分发、暂停、读取与下载|
-|analyst@demo.local|Demo123!|接入、执行、读取与下载；不能批准或安排分发|
-|viewer@demo.local|Demo123!|只读与下载|
+|admin@demo.local|Demo123!|接入、执行、归并/拆分身份、批准、分发、暂停、读取与下载|
+|analyst@demo.local|Demo123!|接入、执行、归并/拆分身份、读取与下载；不能批准或安排分发|
+|viewer@demo.local|Demo123!|只读与下载（可查看身份台账与历史，不能修改）|
+
+## 身份台账口径
+- 页面“身份归并”可把多个号码合为一人，也可把指定号码拆为独立身份；每次成功修改递增身份版本，旧成员区间保留。
+- 归并/拆分请求必须携带页面看到的 `expected_version`。过期时整笔 409 拒绝，不产生部分改动；同一 `operation_key` 重试返回原结果，不重复记账。
+- 新试验创建时冻结身份版本、SHA256 指纹与完整号码归属快照。worker 只读该快照，排队与中断恢复的试验不追随之后的归并；提交试验的 `expected_identity_version` 过期同样整笔拒绝。
+- 训练/验证留出以身份为单位，同一读者的多个号码只进入一侧；原始样本与旧结果不改写。结果页显示每次试验采用的身份证号依据，号码历史页可追查历次归属、原因、操作者与样本批次。
+- 接口：`GET /identities/ledger|operations|conflicts|jobs`、`GET /identities/numbers/{number}`、`POST /identities/merge|split|register`。
 
 ## 技术与本地开发
 Python 3.12 / FastAPI / SQLAlchemy / NumPy / SciPy / scikit-learn；MySQL 8.0；Redis 7；Nginx；原生 HTML CSS JavaScript ES modules（用户指定）。后端所有校验、持久化和算法在服务端。无前端打包步骤。
@@ -28,12 +35,12 @@ Python 3.12 / FastAPI / SQLAlchemy / NumPy / SciPy / scikit-learn；MySQL 8.0；
 
 ## 目录与工程约定
 backend/src/{models,schemas,services,routes,controllers,middlewares,constants,config,utils}；backend/scripts/seed_demo.py；backend/migrations/initial.py。
-frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}。
+frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}。身份台账模型在 backend/src/models/identity.py，服务在 backend/src/services/identity.py，页面在 frontend/src/pages/identities.js。
 Role 枚举：admin/analyst/viewer；JobStatus：queued/running/completed/failed。后端 backend/src/constants/enums.py，前端 frontend/src/constants/enums.js；路由权限在 middlewares/auth.py；页面按相同角色控制操作入口。
 
 ## 环境变量与 Docker
 COMPOSE_PROJECT_NAME=reader-risk；FRONTEND_PORT=18207；BACKEND_PORT=19207；DB_PORT=17707；DB_PASSWORD、JWT_SECRET 见 .env.example；SEED_DEMO 默认 true。共享命名产物卷供后端下载与 worker 写入，数据库/Redis 各持久卷。
-恰好五服务均有健康检查。Redis 队列加 SQL 排队状态兜底；worker 按 next_run 生成本地收件箱文件。周期 60 秒至 30 天。分发结果为批准分析的固定快照；若需新数据重新计算并建立新计划。当前不连接邮件或企业聊天。
+恰好五服务均有健康检查。Redis 队列加 SQL 排队状态兜底；worker 按 next_run 生成本地收件箱文件。周期 60 秒至 30 天。分发结果为批准分析的固定快照；若需新数据重新计算并建立新计划。当前不连接邮件或企业聊天。身份台账每次归并/拆分是一笔独立事务，`identity_state` 单行版本锁与 `operation_key` 唯一约束保证并发下只接受完整一版、重试不重复记账。
 错误响应、请求编号、Redis 每 IP 每分钟 240 次限流、JWT 和数据库操作审计。演示密钥与密码仅供本机模拟；生产部署前配置独立密钥与账号。
 
 ## 数据与验收
